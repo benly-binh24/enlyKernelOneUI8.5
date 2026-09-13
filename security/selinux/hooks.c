@@ -737,42 +737,59 @@ static int bad_option(struct superblock_security_struct *sbsec, char flag,
  * labeling information.
  */
 static int selinux_set_mnt_opts(struct super_block *sb,
-				struct security_mnt_opts *opts,
+				void *mnt_opts,
 				unsigned long kern_flags,
 				unsigned long *set_kern_flags)
 {
-	const struct cred *cred = current_cred();
-	int rc = 0, i;
 	struct superblock_security_struct *sbsec = sb->s_security;
-	const char *name = sb->s_type->name;
-	struct dentry *root = sbsec->sb->s_root;
-	struct inode_security_struct *root_isec;
-	u32 fscontext_sid = 0, context_sid = 0, rootcontext_sid = 0;
-	u32 defcontext_sid = 0;
-	char **mount_options = opts->mnt_opts;
-	int *flags = opts->mnt_opts_flags;
-	int num_opts = opts->num_mnt_opts;
 
-	mutex_lock(&sbsec->lock);
+	if (!sbsec)
+		return -EINVAL;
 
-	if (!selinux_state.initialized) {
-		if (!num_opts) {
-			/* Defer initialization until selinux_complete_init,
-			   after the initial policy is loaded and the security
-			   server is ready to handle calls. */
-			goto out;
-		}
-		rc = -EINVAL;
-		pr_warn("SELinux: Unable to set superblock options "
-			"before the security server is initialized\n");
-		goto out;
+	/* Kiểm tra loại hệ thống tập tin */
+	if (strcmp(sb->s_type->name, "cgroup2") == 0) {
+		/* Gán behavior cho cgroup2 */
+		if (selinux_policycap_cgroup_seclabel)
+			sbsec->behavior = SECURITY_FS_USE_CGROUP2;
+		else
+			sbsec->behavior = SECURITY_FS_USE_GENFS;
+	} else if (strcmp(sb->s_type->name, "bpf") == 0) {
+		/* Gán behavior GENFS cho BPFFS */
+		sbsec->behavior = SECURITY_FS_USE_GENFS;
 	}
-	if (kern_flags && !set_kern_flags) {
-		/* Specifying internal flags without providing a place to
-		 * place the results is not allowed */
-		rc = -EINVAL;
-		goto out;
+
+	return 0;
+}
+
+/*
+ * Hook khởi tạo inode security
+ */
+static int selinux_inode_init_security(struct inode *inode, struct inode *dir,
+				       const struct qstr *qstr,
+				       const char **name, void **value,
+				       size_t *len)
+{
+	struct superblock_security_struct *sbsec = inode->i_sb->s_security;
+	struct inode_security_struct *isec = selinux_inode(inode);
+	u32 sid = SECINITSID_UNLABELED;
+	int rc = 0;
+
+	if (!sbsec || !isec)
+		return -EOPNOTSUPP;
+
+	/* Xử lý gán nhãn nếu superblock thuộc cgroup2 hoặc bpf */
+	if (sbsec->behavior == SECURITY_FS_USE_GENFS || sbsec->behavior == SECURITY_FS_USE_CGROUP2) {
+		rc = security_genfs_sid(&selinux_state, inode->i_sb->s_type->name,
+					"/", inode->i_sb->s_magic, &sid);
+		if (rc)
+			sid = sbsec->sid;
+
+		isec->sid = sid;
+		isec->initialized = LABEL_INITIALIZED;
 	}
+
+	return 0;
+}
 
 	/*
 	 * Binary mount data FS will come through this function twice.  Once
